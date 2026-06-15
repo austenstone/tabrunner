@@ -58,6 +58,12 @@ type Runner struct {
 	out      io.Writer
 }
 
+// writerOnly hides any extra methods (e.g. *os.File's Stat/Name) so wazero
+// treats the target as a plain io.Writer. Without this, passing os.Stdout to
+// WithStdout/WithStderr makes wazero stat the real fd, which fails under
+// GOOS=js with "stat /dev/stdout: not implemented on js".
+type writerOnly struct{ io.Writer }
+
 // New creates a Runner with a compiled wasmsh module ready to instantiate.
 func New(ctx context.Context, rc Context) (*Runner, error) {
 	rt := wazero.NewRuntime(ctx)
@@ -180,7 +186,10 @@ func (r *Runner) runJob(ctx context.Context, wf *workflow.Workflow, job *workflo
 
 		script := r.expandExpressions(step.Run, stepEnv, stepOutputs)
 
+		dbg("runJob step %d: name=%q script=%q", i, step.DisplayName(), script)
+
 		exit, err := r.runStep(ctx, fsys, script, stepEnv)
+		dbg("runJob step %d: exit=%d err=%v", i, exit, err)
 		if err != nil {
 			outcomes = append(outcomes, StepOutcome{ID: step.ID, Name: step.DisplayName(), ExitCode: 1, Conclusion: "failed"})
 			return outcomes, fmt.Errorf("step %d: %w", i+1, err)
@@ -220,8 +229,8 @@ func (r *Runner) runStep(ctx context.Context, fsys *memfs.FS, script string, env
 
 	cfg := wazero.NewModuleConfig().
 		WithStdin(strings.NewReader(script)).
-		WithStdout(r.out).
-		WithStderr(r.out).
+		WithStdout(writerOnly{r.out}).
+		WithStderr(writerOnly{r.out}).
 		WithFSConfig(fsConfig).
 		WithArgs("wasmsh").
 		WithName("") // anonymous so we can instantiate repeatedly

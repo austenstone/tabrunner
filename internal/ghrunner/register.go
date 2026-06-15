@@ -241,6 +241,21 @@ func registerAgent(ctx context.Context, tenantURL, token string, poolID int, age
 // On success the runner identity can be reused on subsequent runs without a new
 // registration token.
 func Register(ctx context.Context, opts RegisterOptions) (*Settings, error) {
+	st, err := RegisterInMemory(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	if err := saveState(settingsDir, st.Settings, st.Key); err != nil {
+		return nil, fmt.Errorf("persist runner state: %w", err)
+	}
+	return &st.Settings, nil
+}
+
+// RegisterInMemory performs the full classic registration but returns the
+// resulting runner state in memory instead of persisting it to disk. This is the
+// wasm-friendly path: the browser has no filesystem, so the caller keeps the
+// *runnerState and threads it through ListenWithState.
+func RegisterInMemory(ctx context.Context, opts RegisterOptions) (*runnerState, error) {
 	auth, err := Handshake(ctx, opts.GitHubURL, opts.RegToken)
 	if err != nil {
 		return nil, err
@@ -307,8 +322,5 @@ func Register(ctx context.Context, opts RegisterOptions) (*Settings, error) {
 		ClientID:         created.Authorization.ClientID,
 		AuthorizationURL: created.Authorization.AuthorizationURL,
 	}
-	if err := saveState(settingsDir, s, key); err != nil {
-		return nil, fmt.Errorf("persist runner state: %w", err)
-	}
-	return &s, nil
+	return &runnerState{Settings: s, Key: key}, nil
 }

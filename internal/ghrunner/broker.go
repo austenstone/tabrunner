@@ -67,8 +67,16 @@ func (b *brokerSession) brokerQuery() url.Values {
 // the absolute {brokerBase}/session and there is no api-version negotiation. If
 // the broker wraps its own AES key we unwrap it with our private key; otherwise
 // we fall back to the classic session's key.
+// BrokerURLRewrite, when set, rewrites the broker base URL before the session is
+// created. Used by the wasm/browser build to route the no-CORS broker leg through
+// a small CORS proxy. nil for native runs (direct broker access).
+var BrokerURLRewrite func(string) string
+
 func createBrokerSession(ctx context.Context, st *runnerState, token, brokerBase string, classicKey []byte) (*brokerSession, error) {
 	base := strings.TrimRight(brokerBase, "/")
+	if BrokerURLRewrite != nil {
+		base = strings.TrimRight(BrokerURLRewrite(base), "/")
+	}
 	host, _ := os.Hostname()
 	if host == "" {
 		host = "tabrunner"
@@ -166,7 +174,7 @@ func (b *brokerSession) close(ctx context.Context) error {
 // listenBroker runs the broker message loop after a BrokerMigration redirect. It
 // creates a broker session, then polls until ctx is cancelled, refreshing the
 // access token as needed and dispatching each decrypted message to handler.
-func listenBroker(ctx context.Context, dir string, st *runnerState, token string, expires time.Time, brokerBaseURL string, classicKey []byte, handler func(msgType, body string, msgID int64) error) error {
+func listenBroker(ctx context.Context, st *runnerState, token string, expires time.Time, brokerBaseURL string, classicKey []byte, handler func(msgType, body string, msgID int64) error) error {
 	bs, err := createBrokerSession(ctx, st, token, brokerBaseURL, classicKey)
 	if err != nil {
 		return err
@@ -189,11 +197,11 @@ func listenBroker(ctx context.Context, dir string, st *runnerState, token string
 		}
 
 		if time.Until(expires) < 5*time.Minute {
-			t, exp, rerr := FetchAccessToken(ctx, dir)
+			at, rerr := getAccessToken(ctx, st)
 			if rerr != nil {
 				return fmt.Errorf("refresh access token: %w", rerr)
 			}
-			token, expires = t, exp
+			token, expires = at.Token, at.Expires
 			bs.token = token
 		}
 
@@ -244,7 +252,7 @@ func listenBroker(ctx context.Context, dir string, st *runnerState, token string
 			if aerr != nil {
 				fmt.Printf("acquire job: %v\n", aerr)
 			} else if job != nil {
-				fmt.Printf("acquired job: jobID=%s planID=%s (dumped to .tabrunner/acquired_job.json)\n", job.jobID, job.planID)
+				fmt.Printf("acquired job: jobID=%s planID=%s\n", job.jobID, job.planID)
 				if eerr := executeAndComplete(ctx, job, jr, bs.token); eerr != nil {
 					fmt.Printf("execute/complete job: %v\n", eerr)
 				}

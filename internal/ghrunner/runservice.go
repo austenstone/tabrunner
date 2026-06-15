@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -72,9 +70,8 @@ func ciField(m map[string]json.RawMessage, names ...string) (json.RawMessage, bo
 	return nil, false
 }
 
-// acquireJob claims the job described by a RunnerJobRequest. On success it dumps
-// the raw AgentJobRequestMessage to .tabrunner/acquired_job.json and extracts the
-// job and plan IDs. 404/409/422 mean the job is gone or already taken; we treat
+// acquireJob claims the job described by a RunnerJobRequest. On success it extracts
+// the job and plan IDs. 404/409/422 mean the job is gone or already taken; we treat
 // those as a skip (nil, nil) rather than an error to retry.
 func acquireJob(ctx context.Context, jr *runnerJobRequest, token string) (*acquiredJob, error) {
 	if jr.RunServiceURL == "" {
@@ -98,13 +95,6 @@ func acquireJob(ctx context.Context, jr *runnerJobRequest, token string) (*acqui
 			}
 		}
 		return nil, fmt.Errorf("acquire job: %w", err)
-	}
-
-	dumpPath := filepath.Join(settingsDir, "acquired_job.json")
-	if werr := os.WriteFile(dumpPath, raw, 0o600); werr != nil {
-		fmt.Printf("dump acquired job: %v\n", werr)
-	} else {
-		fmt.Printf("acquired job dumped to %s (%d bytes)\n", dumpPath, len(raw))
 	}
 
 	job := &acquiredJob{raw: raw}

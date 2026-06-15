@@ -138,8 +138,10 @@ func translateAcquiredJob(raw json.RawMessage) (*workflow.Workflow, runner.Conte
 	if v, ok := ciField(top, "steps"); ok {
 		var rawSteps []map[string]json.RawMessage
 		if json.Unmarshal(v, &rawSteps) == nil {
-			for _, s := range rawSteps {
+			dbg("translate: rawSteps=%d", len(rawSteps))
+			for si, s := range rawSteps {
 				cmd := stepScript(s)
+				dbg("translate step %d: scriptLen=%d script=%q", si, len(cmd), truncate(cmd, 120))
 				if cmd == "" {
 					continue // uses-step or non-script; skip for now
 				}
@@ -236,6 +238,7 @@ func executeAndComplete(ctx context.Context, job *acquiredJob, jr *runnerJobRequ
 	if err != nil {
 		return fmt.Errorf("new runner: %w", err)
 	}
+	r.SetOutput(logWriter{})
 	defer r.Close(ctx)
 
 	outcomes, runErr := r.RunWorkflowWithResults(ctx, wf, "")
@@ -250,7 +253,10 @@ func executeAndComplete(ctx context.Context, job *acquiredJob, jr *runnerJobRequ
 			break
 		}
 	}
-	fmt.Printf("job execution finished: conclusion=%s steps=%d\n", conclusion, len(outcomes))
+	dbg("execute: conclusion=%s runErr=%v steps=%d", conclusion, runErr, len(outcomes))
+	for i, o := range outcomes {
+		dbg("execute step %d: name=%q exit=%d conclusion=%s", i, o.Name, o.ExitCode, o.Conclusion)
+	}
 
 	completeToken := job.runServiceToken
 	if completeToken == "" {

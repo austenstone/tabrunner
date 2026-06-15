@@ -11,6 +11,17 @@ const runBtn = document.getElementById("run");
 const statusEl = document.getElementById("status");
 const examplesEl = document.getElementById("examples");
 
+const ghurlEl = document.getElementById("ghurl");
+const regtokenEl = document.getElementById("regtoken");
+const labelsEl = document.getElementById("labels");
+const configcmdEl = document.getElementById("configcmd");
+const newRunnerLink = document.getElementById("newrunner-link");
+const connectBtn = document.getElementById("connect");
+const connectStatusEl = document.getElementById("connect-status");
+const connectStatusText = document.getElementById("connect-status-text");
+const connectDot = connectStatusEl ? connectStatusEl.querySelector(".dot") : null;
+const connectLog = document.getElementById("connect-log");
+
 const EXAMPLES = {
   hello: {
     label: "Hello tabrunner",
@@ -155,7 +166,125 @@ globalThis.tabrunnerReady = function () {
   consoleEl.innerHTML =
     '<span class="dim">Ready. Edit the workflow and hit Run.</span>';
   setStatus("");
+
+  if (connectBtn) {
+    connectBtn.disabled = false;
+    connectBtn.textContent = "Connect";
+  }
+  if (connectStatusText) connectStatusText.textContent = "Idle — ready to connect";
+  if (connectDot) connectDot.className = "dot";
 };
+
+let connecting = false;
+
+function connectStatus(stage, detail) {
+  if (!connectStatusEl) return;
+  const dotClass = { listening: "live", registering: "work", job: "work", error: "err", disconnected: "" };
+  if (connectDot) connectDot.className = "dot" + (dotClass[stage] ? " " + dotClass[stage] : "");
+  const labels = {
+    registering: "Registering runner…",
+    listening: "Listening for jobs",
+    job: "Running job",
+    error: "Error",
+    disconnected: "Disconnected",
+  };
+  if (connectStatusText) connectStatusText.textContent = (labels[stage] || stage) + (detail ? " — " + detail : "");
+
+  if (connectLog) {
+    connectLog.hidden = false;
+    const line = document.createElement("div");
+    line.textContent = "[" + stage + "] " + (detail || "");
+    connectLog.appendChild(line);
+    connectLog.scrollTop = connectLog.scrollHeight;
+  }
+
+  if (stage === "disconnected" || stage === "error") {
+    connecting = false;
+    if (connectBtn) {
+      connectBtn.disabled = false;
+      connectBtn.textContent = "Connect";
+    }
+  }
+}
+
+// Go calls this to report connection lifecycle progress.
+globalThis.tabrunnerStatus = connectStatus;
+
+if (connectBtn) {
+  connectBtn.addEventListener("click", () => {
+    if (!ready || connecting) return;
+    const url = (ghurlEl.value || "").trim();
+    const token = (regtokenEl.value || "").trim();
+    const labels = (labelsEl.value || "").trim();
+    if (!url || !token) {
+      connectStatus("error", "GitHub URL and registration token are required");
+      return;
+    }
+
+    connecting = true;
+    connectBtn.disabled = true;
+    connectBtn.textContent = "Connecting…";
+    connectStatus("registering", url);
+
+    const res = globalThis.tabrunnerConnect(url, token, labels);
+    const err = res && res.error;
+    if (err) connectStatus("error", err);
+  });
+}
+
+// Parse a `./config.sh --url ... --token ... [--labels ...]` command string.
+function parseConfigCommand(text) {
+  return {
+    url: ((text.match(/--url\s+(\S+)/) || [])[1] || "").trim(),
+    token: ((text.match(/--token\s+(\S+)/) || [])[1] || "").trim(),
+    labels: ((text.match(/--labels\s+(\S+)/) || [])[1] || "").trim(),
+  };
+}
+
+// Derive the "add runner" settings URL from a GitHub org or repo URL.
+function newRunnerUrl(ghurl) {
+  const m = (ghurl || "").trim().match(/github\.com\/([^/\s]+)(?:\/([^/\s]+))?/i);
+  if (!m) return null;
+  const owner = m[1];
+  const repo = m[2];
+  return repo
+    ? `https://github.com/${owner}/${repo}/settings/actions/runners/new`
+    : `https://github.com/organizations/${owner}/settings/actions/runners/new`;
+}
+
+function syncNewRunnerLink() {
+  if (!newRunnerLink) return;
+  const u = newRunnerUrl(ghurlEl && ghurlEl.value);
+  if (u) newRunnerLink.href = u;
+}
+
+function applyConfigCommand(text) {
+  const { url, token, labels } = parseConfigCommand(text);
+  if (url && ghurlEl) ghurlEl.value = url;
+  if (token && regtokenEl) regtokenEl.value = token;
+  if (labels && labelsEl) labelsEl.value = labels;
+  syncNewRunnerLink();
+}
+
+if (configcmdEl) {
+  configcmdEl.addEventListener("input", () => applyConfigCommand(configcmdEl.value));
+}
+
+// Also let users paste the full config.sh command straight into the URL/token fields.
+[ghurlEl, regtokenEl].forEach((el) => {
+  if (!el) return;
+  el.addEventListener("paste", (e) => {
+    const clip = e.clipboardData || window.clipboardData;
+    const t = clip ? clip.getData("text") : "";
+    if (t && /--url\s+\S+|--token\s+\S+/.test(t)) {
+      e.preventDefault();
+      applyConfigCommand(t);
+    }
+  });
+});
+
+if (ghurlEl) ghurlEl.addEventListener("input", syncNewRunnerLink);
+syncNewRunnerLink();
 
 runBtn.addEventListener("click", () => {
   if (!ready) return;

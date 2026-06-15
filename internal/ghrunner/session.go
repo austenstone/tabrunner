@@ -188,11 +188,19 @@ func Listen(ctx context.Context, dir string, handler func(msgType, body string, 
 	if err != nil {
 		return fmt.Errorf("load runner state: %w", err)
 	}
+	return ListenWithState(ctx, st, handler)
+}
 
-	token, expires, err := FetchAccessToken(ctx, dir)
+// ListenWithState is the disk-free core of Listen: it operates on an in-memory
+// runnerState (no settings/credentials files), minting and refreshing access
+// tokens directly. This is the entry point used by the wasm build, where there
+// is no filesystem to persist runner identity to.
+func ListenWithState(ctx context.Context, st *runnerState, handler func(msgType, body string, msgID int64) error) error {
+	at, err := getAccessToken(ctx, st)
 	if err != nil {
 		return fmt.Errorf("fetch access token: %w", err)
 	}
+	token, expires := at.Token, at.Expires
 
 	sess, err := CreateSession(ctx, st, token)
 	if err != nil {
@@ -218,11 +226,11 @@ func Listen(ctx context.Context, dir string, handler func(msgType, body string, 
 
 		// Refresh the token before it expires (tokens last ~50m).
 		if time.Until(expires) < 5*time.Minute {
-			t, exp, rerr := FetchAccessToken(ctx, dir)
+			rat, rerr := getAccessToken(ctx, st)
 			if rerr != nil {
 				return fmt.Errorf("refresh access token: %w", rerr)
 			}
-			token, expires = t, exp
+			token, expires = rat.Token, rat.Expires
 			sess.token = token
 		}
 
@@ -263,7 +271,7 @@ func Listen(ctx context.Context, dir string, handler func(msgType, body string, 
 				fmt.Printf("ack broker migration %d: %v\n", msgID, derr)
 			}
 			fmt.Printf("broker migration -> %s\n", brokerBase)
-			return listenBroker(ctx, dir, st, token, expires, brokerBase, sess.aesKey, handler)
+			return listenBroker(ctx, st, token, expires, brokerBase, sess.aesKey, handler)
 		}
 
 		if herr := handler(msgType, body, msgID); herr != nil {
