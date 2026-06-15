@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/austenstone/tabrunner/internal/ghrunner"
 	"github.com/austenstone/tabrunner/internal/runner"
@@ -64,9 +65,27 @@ func connectCmd(args []string) {
 	token := fs.String("token", "", "runner registration token")
 	name := fs.String("name", "", "runner name (default: random tabrunner-xxxx)")
 	handshakeOnly := fs.Bool("handshake-only", false, "only run the RemoteAuth handshake and print the result")
+	tokenOnly := fs.Bool("token-only", false, "load existing runner state and fetch an OAuth access token, then exit")
 	fs.Parse(args)
 
 	ctx := context.Background()
+
+	if *tokenOnly {
+		if !ghrunner.StateExists("") {
+			fatal("no runner state found; register first with: tabrunner connect --url <url> --token <reg-token>")
+		}
+		tok, exp, err := ghrunner.FetchAccessToken(ctx, "")
+		if err != nil {
+			fatal("%v", err)
+		}
+		prefix := tok
+		if len(prefix) > 16 {
+			prefix = prefix[:16] + "..."
+		}
+		fmt.Printf("access token ok ✅\n  token:   %s\n  len:     %d\n  expires: %s (in %s)\n",
+			prefix, len(tok), exp.Format("15:04:05"), exp.Sub(time.Now()).Round(time.Second))
+		return
+	}
 
 	if *handshakeOnly {
 		if *url == "" || *token == "" {
