@@ -5,6 +5,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/austenstone/tabrunner/internal/ghrunner"
@@ -66,6 +68,7 @@ func connectCmd(args []string) {
 	name := fs.String("name", "", "runner name (default: random tabrunner-xxxx)")
 	handshakeOnly := fs.Bool("handshake-only", false, "only run the RemoteAuth handshake and print the result")
 	tokenOnly := fs.Bool("token-only", false, "load existing runner state and fetch an OAuth access token, then exit")
+	listen := fs.Bool("listen", false, "run the long-poll message loop and print each decoded job message")
 	fs.Parse(args)
 
 	ctx := context.Background()
@@ -102,6 +105,23 @@ func connectCmd(args []string) {
 		}
 		fmt.Printf("handshake ok\n  service url:  %s\n  token schema: %s\n  token:        %s\n  use_v2_flow:  %v\n",
 			res.URL, res.TokenSchema, tokPrefix, res.UseV2Flow)
+		return
+	}
+
+	if *listen {
+		if !ghrunner.StateExists("") {
+			fatal("no runner state found; register first with: tabrunner connect --url <url> --token <reg-token>")
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		err := ghrunner.Listen(ctx, "", func(msgType, body string, msgID int64) error {
+			fmt.Printf("\n── message %d ──\n  type: %s\n  body: %s\n", msgID, msgType, body)
+			_ = os.WriteFile(".tabrunner/last_job.json", []byte(body), 0o600)
+			return nil
+		})
+		if err != nil {
+			fatal("%v", err)
+		}
 		return
 	}
 

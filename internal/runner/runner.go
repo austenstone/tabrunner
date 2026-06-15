@@ -84,18 +84,38 @@ func (r *Runner) Close(ctx context.Context) error {
 	return r.rt.Close(ctx)
 }
 
+// StepOutcome is the per-step result of executing a job, used to report step
+// results back to GitHub via the Run Service completejob call.
+type StepOutcome struct {
+	ID         string // step identifier (UUID for acquired jobs)
+	Name       string
+	ExitCode   int
+	Conclusion string // "succeeded", "failed", or "skipped"
+}
+
 // RunWorkflow executes every job (or just one if jobFilter is non-empty).
 func (r *Runner) RunWorkflow(ctx context.Context, wf *workflow.Workflow, jobFilter string) error {
+	_, err := r.RunWorkflowWithResults(ctx, wf, jobFilter)
+	return err
+}
+
+// RunWorkflowWithResults executes the workflow and returns the per-step
+// outcomes alongside any error. Outcomes are returned even on failure so the
+// caller can report partial results.
+func (r *Runner) RunWorkflowWithResults(ctx context.Context, wf *workflow.Workflow, jobFilter string) ([]StepOutcome, error) {
+	var all []StepOutcome
 	for _, job := range wf.Jobs {
 		if jobFilter != "" && job.ID != jobFilter {
 			continue
 		}
 		fmt.Fprintf(r.out, "\n\033[1m== Job: %s ==\033[0m\n", job.Name)
-		if err := r.runJob(ctx, wf, job); err != nil {
-			return fmt.Errorf("job %q failed: %w", job.ID, err)
+		outcomes, err := r.runJob(ctx, wf, job)
+		all = append(all, outcomes...)
+		if err != nil {
+			return all, fmt.Errorf("job %q failed: %w", job.ID, err)
 		}
 	}
-	return nil
+	return all, nil
 }
 
 // Guest paths (inside the Wasm sandbox, where the in-memory FS maps to "/").
@@ -108,11 +128,13 @@ const (
 	guestWork   = "/work"
 )
 
-func (r *Runner) runJob(ctx context.Context, wf *workflow.Workflow, job *workflow.Job) error {
+func (r *Runner) runJob(ctx context.Context, wf *workflow.Workflow, job *workflow.Job) ([]StepOutcome, error) {
+	var outcomes []StepOutcome
+
 	fsys := memfs.New()
 	for _, d := range []string{guestWork, "/github"} {
 		if err := fsys.MkdirAll(d); err != nil {
-			return fmt.Errorf("create %s: %w", d, err)
+			return outcomes, fmt.Errorf("create %s: %w", d, err)
 		}
 	}
 
@@ -130,16 +152,19 @@ func (r *Runner) runJob(ctx context.Context, wf *workflow.Workflow, job *workflo
 
 		if step.Uses != "" {
 			fmt.Fprintf(r.out, "   \033[33m(skipped: `uses:` actions are not supported in M0)\033[0m\n")
+			outcomes = append(outcomes, StepOutcome{ID: step.ID, Name: step.DisplayName(), Conclusion: "skipped"})
 			continue
 		}
 		if strings.TrimSpace(step.Run) == "" {
+			outcomes = append(outcomes, StepOutcome{ID: step.ID, Name: step.DisplayName(), Conclusion: "skipped"})
 			continue
 		}
 
 		// Fresh, empty file-command files before each step.
 		for _, p := range []string{guestOutput, guestEnv, guestPath, guestState} {
 			if err := fsys.WriteFile(p, nil); err != nil {
-				return err
+				outcomes = append(outcomes, StepOutcome{ID: step.ID, Name: step.DisplayName(), ExitCode: 1, Conclusion: "failed"})
+				return outcomes, err
 			}
 		}
 
@@ -157,7 +182,8 @@ func (r *Runner) runJob(ctx context.Context, wf *workflow.Workflow, job *workflo
 
 		exit, err := r.runStep(ctx, fsys, script, stepEnv)
 		if err != nil {
-			return fmt.Errorf("step %d: %w", i+1, err)
+			outcomes = append(outcomes, StepOutcome{ID: step.ID, Name: step.DisplayName(), ExitCode: 1, Conclusion: "failed"})
+			return outcomes, fmt.Errorf("step %d: %w", i+1, err)
 		}
 
 		// Parse file-command outputs regardless of exit code.
@@ -173,16 +199,19 @@ func (r *Runner) runJob(ctx context.Context, wf *workflow.Workflow, job *workflo
 		}
 
 		if exit != 0 {
+			outcomes = append(outcomes, StepOutcome{ID: step.ID, Name: step.DisplayName(), ExitCode: exit, Conclusion: "failed"})
 			if step.ContinueOnError {
 				fmt.Fprintf(r.out, "   \033[33m(exit %d, continue-on-error)\033[0m\n", exit)
 				continue
 			}
-			return fmt.Errorf("step %q exited with code %d", step.DisplayName(), exit)
+			return outcomes, fmt.Errorf("step %q exited with code %d", step.DisplayName(), exit)
 		}
+
+		outcomes = append(outcomes, StepOutcome{ID: step.ID, Name: step.DisplayName(), ExitCode: 0, Conclusion: "succeeded"})
 	}
 
 	fmt.Fprintf(r.out, "\n\033[32m== Job %s completed ==\033[0m\n", job.Name)
-	return nil
+	return outcomes, nil
 }
 
 // runStep executes a single script inside the Wasm sandbox. Returns the exit code.

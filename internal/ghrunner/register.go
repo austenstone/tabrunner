@@ -15,12 +15,18 @@ import (
 
 // runnerVersion is reported to the service. It influences whether GitHub thinks
 // the agent needs a self-update; a recent value avoids forced-update messages.
-const runnerVersion = "2.330.0"
+const runnerVersion = "2.335.1"
 
 const dotcomAPIBase = "https://api.github.com"
 
-// httpClient is shared; long-poll timeouts are handled per-request via context.
+// httpClient is shared for short request/response calls.
 var httpClient = &http.Client{Timeout: 30 * time.Second}
+
+// pollClient has no client-level deadline so the long-poll is governed purely by
+// the per-request context. http.Client.Timeout is an absolute cap that a longer
+// request context cannot extend, so reusing httpClient would kill the ~50s
+// long-poll at 30s.
+var pollClient = &http.Client{}
 
 // GitHubAuthResult is the response from the RemoteAuth handshake
 // (POST /actions/runner-registration). It tells us the Actions service URL, a
@@ -106,6 +112,10 @@ func randomName() string {
 }
 
 func doJSON(ctx context.Context, method, url, authHeader, apiVersion string, body any, out any) (*http.Response, error) {
+	return doJSONWithClient(ctx, httpClient, method, url, authHeader, apiVersion, body, out)
+}
+
+func doJSONWithClient(ctx context.Context, client *http.Client, method, url, authHeader, apiVersion string, body any, out any) (*http.Response, error) {
 	// The Actions/Azure DevOps service negotiates the request/response contract
 	// version through the media type, NOT the query string. Without an
 	// "api-version" parameter on Content-Type/Accept the agents controller binds
@@ -135,7 +145,7 @@ func doJSON(ctx context.Context, method, url, authHeader, apiVersion string, bod
 	}
 	req.Header.Set("Accept", mediaType)
 	req.Header.Set("User-Agent", "tabrunner/0.1 (+https://github.com/austenstone/tabrunner)")
-	resp, err := httpClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -146,7 +156,17 @@ func doJSON(ctx context.Context, method, url, authHeader, apiVersion string, bod
 	}
 	defer resp.Body.Close()
 	if out != nil {
-		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		// Long-poll endpoints return 200/204 with an EMPTY body when the
+		// server-side poll times out with no work. An empty body is not a
+		// decode error -- treat it as "no content" and leave out at zero value.
+		data, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return resp, fmt.Errorf("read response: %w", err)
+		}
+		if len(bytes.TrimSpace(data)) == 0 {
+			return resp, nil
+		}
+		if err := json.Unmarshal(data, out); err != nil {
 			return resp, fmt.Errorf("decode response: %w", err)
 		}
 	}
