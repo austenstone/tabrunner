@@ -1,0 +1,26 @@
+name: Hello tabrunner
+on: push
+
+jobs:
+  greet:
+    name: Greet
+    runs-on: self-hosted
+    steps:
+      - name: Say hello
+        run: echo "Hello from inside Wasm!"
+
+      - name: Produce an output
+        id: gen
+        run: |
+          echo "greeting=hi-from-wasm" >> $GITHUB_OUTPUT
+          echo "Wrote an output"
+
+      - name: Pass data via GITHUB_ENV
+        run: echo "SHARED=passed-through" >> $GITHUB_ENV
+
+      - name: Consume previous output and env
+        run: |
+          echo "output was: ${{ steps.gen.outputs.greeting }}"
+          echo "env was: $SHARED"
+          printf "multi\nline\n" > note.txt
+          cat note.txt

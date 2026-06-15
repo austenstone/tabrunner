@@ -7,6 +7,8 @@
 
 # Wasm artifacts
 *.wasm
+# ...except the embedded shell, which must ship in the binary
+!internal/wasmsh/wasmsh.wasm
 
 # Go
 /vendor/
