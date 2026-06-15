@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -66,6 +67,7 @@ func connectCmd(args []string) {
 	url := fs.String("url", "", "GitHub org or repo URL (e.g. https://github.com/octodemo)")
 	token := fs.String("token", "", "runner registration token")
 	name := fs.String("name", "", "runner name (default: random tabrunner-xxxx)")
+	labels := fs.String("labels", "tabrunner", "comma-separated custom runner labels (use these in runs-on:)")
 	handshakeOnly := fs.Bool("handshake-only", false, "only run the RemoteAuth handshake and print the result")
 	tokenOnly := fs.Bool("token-only", false, "load existing runner state and fetch an OAuth access token, then exit")
 	listen := fs.Bool("listen", false, "run the long-poll message loop and print each decoded job message")
@@ -143,6 +145,7 @@ func connectCmd(args []string) {
 		GitHubURL: *url,
 		RegToken:  *token,
 		Name:      *name,
+		Labels:    splitLabels(*labels),
 	})
 	if err != nil {
 		fatal("%v", err)
@@ -164,4 +167,14 @@ Each run: step executes inside a wazero sandbox via the embedded wasmsh shell.`)
 func fatal(format string, a ...any) {
 	fmt.Fprintf(os.Stderr, "\033[31merror:\033[0m "+format+"\n", a...)
 	os.Exit(1)
+}
+
+func splitLabels(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
