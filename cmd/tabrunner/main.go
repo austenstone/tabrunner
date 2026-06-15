@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/austenstone/tabrunner/internal/ghrunner"
 	"github.com/austenstone/tabrunner/internal/runner"
 	"github.com/austenstone/tabrunner/internal/workflow"
 )
@@ -19,6 +20,8 @@ func main() {
 	switch os.Args[1] {
 	case "run":
 		runCmd(os.Args[2:])
+	case "connect":
+		connectCmd(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -55,11 +58,66 @@ func runCmd(args []string) {
 	}
 }
 
+func connectCmd(args []string) {
+	fs := flag.NewFlagSet("connect", flag.ExitOnError)
+	url := fs.String("url", "", "GitHub org or repo URL (e.g. https://github.com/octodemo)")
+	token := fs.String("token", "", "runner registration token")
+	name := fs.String("name", "", "runner name (default: random tabrunner-xxxx)")
+	handshakeOnly := fs.Bool("handshake-only", false, "only run the RemoteAuth handshake and print the result")
+	fs.Parse(args)
+
+	ctx := context.Background()
+
+	if *handshakeOnly {
+		if *url == "" || *token == "" {
+			fmt.Fprintln(os.Stderr, "usage: tabrunner connect --url <github-url> --token <reg-token> --handshake-only")
+			os.Exit(2)
+		}
+		res, err := ghrunner.Handshake(ctx, *url, *token)
+		if err != nil {
+			fatal("%v", err)
+		}
+		tokPrefix := res.Token
+		if len(tokPrefix) > 12 {
+			tokPrefix = tokPrefix[:12] + "..."
+		}
+		fmt.Printf("handshake ok\n  service url:  %s\n  token schema: %s\n  token:        %s\n  use_v2_flow:  %v\n",
+			res.URL, res.TokenSchema, tokPrefix, res.UseV2Flow)
+		return
+	}
+
+	if ghrunner.StateExists("") {
+		s, err := ghrunner.LoadSettings("")
+		if err != nil {
+			fatal("load existing runner state: %v", err)
+		}
+		fmt.Printf("already registered as %s (id %d). Delete ./.tabrunner to re-register.\n", s.AgentName, s.AgentID)
+		return
+	}
+
+	if *url == "" || *token == "" {
+		fmt.Fprintln(os.Stderr, "usage: tabrunner connect --url <github-url> --token <reg-token>")
+		os.Exit(2)
+	}
+
+	s, err := ghrunner.Register(ctx, ghrunner.RegisterOptions{
+		GitHubURL: *url,
+		RegToken:  *token,
+		Name:      *name,
+	})
+	if err != nil {
+		fatal("%v", err)
+	}
+	fmt.Printf("registered as a self-hosted runner ✅\n  name:    %s\n  id:      %d\n  pool:    %d\n  server:  %s\ncredentials saved to ./.tabrunner\n",
+		s.AgentName, s.AgentID, s.PoolID, s.ServerURL)
+}
+
 func usage() {
 	fmt.Println(`tabrunner - the first WebAssembly GitHub Actions runner
 
 Usage:
-  tabrunner run <workflow.yml> [-j job]   Execute a workflow locally in Wasm
+  tabrunner run <workflow.yml> [-j job]            Execute a workflow locally in Wasm
+  tabrunner connect --url <url> --token <token>    Register as a GitHub self-hosted runner
 
 Each run: step executes inside a wazero sandbox via the embedded wasmsh shell.`)
 }

@@ -22,3 +22,9 @@ go.work.sum
 
 # Generated web artifacts (built in CI)
 web/wasm_exec.js
+
+# Runner registration state (live creds — never commit)
+.tabrunner/
+
+# Native build output
+/tabrunner
