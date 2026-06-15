@@ -2,20 +2,27 @@
 // each `run:` step inside a Wasm sandbox (wazero) using the embedded wasmsh
 // shell, and wires up the GitHub Actions file-command protocol so that outputs
 // and env vars flow between steps.
+//
+// Filesystem state lives in an in-memory FS (internal/memfs) shared between the
+// host and the Wasm guest. That keeps the runner free of any real-disk
+// dependency, so the exact same code runs natively and in the browser
+// (GOOS=js), where there is no usable OS filesystem.
 package runner
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 
+	"github.com/austenstone/tabrunner/internal/memfs"
 	"github.com/austenstone/tabrunner/internal/wasmsh"
 	"github.com/austenstone/tabrunner/internal/workflow"
 	"github.com/tetratelabs/wazero"
+	"github.com/tetratelabs/wazero/experimental/sysfs"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 	"github.com/tetratelabs/wazero/sys"
 )
@@ -48,6 +55,7 @@ type Runner struct {
 	ctx      Context
 	rt       wazero.Runtime
 	compiled wazero.CompiledModule
+	out      io.Writer
 }
 
 // New creates a Runner with a compiled wasmsh module ready to instantiate.
@@ -60,7 +68,15 @@ func New(ctx context.Context, rc Context) (*Runner, error) {
 		rt.Close(ctx)
 		return nil, fmt.Errorf("compile wasmsh: %w", err)
 	}
-	return &Runner{ctx: rc, rt: rt, compiled: compiled}, nil
+	return &Runner{ctx: rc, rt: rt, compiled: compiled, out: os.Stdout}, nil
+}
+
+// SetOutput redirects all runner and step output to w (defaults to os.Stdout).
+// The browser build uses this to stream logs into the page.
+func (r *Runner) SetOutput(w io.Writer) {
+	if w != nil {
+		r.out = w
+	}
 }
 
 // Close releases the wazero runtime.
@@ -74,7 +90,7 @@ func (r *Runner) RunWorkflow(ctx context.Context, wf *workflow.Workflow, jobFilt
 		if jobFilter != "" && job.ID != jobFilter {
 			continue
 		}
-		fmt.Printf("\n\033[1m== Job: %s ==\033[0m\n", job.Name)
+		fmt.Fprintf(r.out, "\n\033[1m== Job: %s ==\033[0m\n", job.Name)
 		if err := r.runJob(ctx, wf, job); err != nil {
 			return fmt.Errorf("job %q failed: %w", job.ID, err)
 		}
@@ -82,29 +98,23 @@ func (r *Runner) RunWorkflow(ctx context.Context, wf *workflow.Workflow, jobFilt
 	return nil
 }
 
-func (r *Runner) runJob(ctx context.Context, wf *workflow.Workflow, job *workflow.Job) error {
-	hostDir, err := os.MkdirTemp("", "tabrunner-job-")
-	if err != nil {
-		return fmt.Errorf("create job dir: %w", err)
-	}
-	defer os.RemoveAll(hostDir)
+// Guest paths (inside the Wasm sandbox, where the in-memory FS maps to "/").
+// The host reads/writes the same paths through the shared memfs.
+const (
+	guestOutput = "/github/output"
+	guestEnv    = "/github/env"
+	guestPath   = "/github/path"
+	guestState  = "/github/state"
+	guestWork   = "/work"
+)
 
-	workDir := filepath.Join(hostDir, "work")
-	ghDir := filepath.Join(hostDir, "github")
-	for _, d := range []string{workDir, ghDir} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			return err
+func (r *Runner) runJob(ctx context.Context, wf *workflow.Workflow, job *workflow.Job) error {
+	fsys := memfs.New()
+	for _, d := range []string{guestWork, "/github"} {
+		if err := fsys.MkdirAll(d); err != nil {
+			return fmt.Errorf("create %s: %w", d, err)
 		}
 	}
-
-	// Guest paths (inside the Wasm sandbox, where hostDir maps to "/").
-	const (
-		guestOutput = "/github/output"
-		guestEnv    = "/github/env"
-		guestPath   = "/github/path"
-		guestState  = "/github/state"
-		guestWork   = "/work"
-	)
 
 	jobEnv := r.baseEnv()
 	jobEnv["GITHUB_WORKSPACE"] = guestWork
@@ -116,10 +126,10 @@ func (r *Runner) runJob(ctx context.Context, wf *workflow.Workflow, job *workflo
 	var pathPrepends []string
 
 	for i, step := range job.Steps {
-		fmt.Printf("\n\033[36m-> %s\033[0m\n", step.DisplayName())
+		fmt.Fprintf(r.out, "\n\033[36m-> %s\033[0m\n", step.DisplayName())
 
 		if step.Uses != "" {
-			fmt.Printf("   \033[33m(skipped: `uses:` actions are not supported in M0)\033[0m\n")
+			fmt.Fprintf(r.out, "   \033[33m(skipped: `uses:` actions are not supported in M0)\033[0m\n")
 			continue
 		}
 		if strings.TrimSpace(step.Run) == "" {
@@ -127,13 +137,8 @@ func (r *Runner) runJob(ctx context.Context, wf *workflow.Workflow, job *workflo
 		}
 
 		// Fresh, empty file-command files before each step.
-		for _, p := range []string{
-			filepath.Join(ghDir, "output"),
-			filepath.Join(ghDir, "env"),
-			filepath.Join(ghDir, "path"),
-			filepath.Join(ghDir, "state"),
-		} {
-			if err := os.WriteFile(p, nil, 0o644); err != nil {
+		for _, p := range []string{guestOutput, guestEnv, guestPath, guestState} {
+			if err := fsys.WriteFile(p, nil); err != nil {
 				return err
 			}
 		}
@@ -150,44 +155,44 @@ func (r *Runner) runJob(ctx context.Context, wf *workflow.Workflow, job *workflo
 
 		script := r.expandExpressions(step.Run, stepEnv, stepOutputs)
 
-		exit, err := r.runStep(ctx, hostDir, script, stepEnv)
+		exit, err := r.runStep(ctx, fsys, script, stepEnv)
 		if err != nil {
 			return fmt.Errorf("step %d: %w", i+1, err)
 		}
 
 		// Parse file-command outputs regardless of exit code.
-		outs := parseKeyVals(filepath.Join(ghDir, "output"))
+		outs := parseKeyVals(fsys, guestOutput)
 		if step.ID != "" && len(outs) > 0 {
 			stepOutputs[step.ID] = outs
 		}
-		for k, v := range parseKeyVals(filepath.Join(ghDir, "env")) {
+		for k, v := range parseKeyVals(fsys, guestEnv) {
 			jobEnv[k] = v
 		}
-		if extra := parsePathFile(filepath.Join(ghDir, "path")); len(extra) > 0 {
+		if extra := parsePathFile(fsys, guestPath); len(extra) > 0 {
 			pathPrepends = append(extra, pathPrepends...)
 		}
 
 		if exit != 0 {
 			if step.ContinueOnError {
-				fmt.Printf("   \033[33m(exit %d, continue-on-error)\033[0m\n", exit)
+				fmt.Fprintf(r.out, "   \033[33m(exit %d, continue-on-error)\033[0m\n", exit)
 				continue
 			}
 			return fmt.Errorf("step %q exited with code %d", step.DisplayName(), exit)
 		}
 	}
 
-	fmt.Printf("\n\033[32m== Job %s completed ==\033[0m\n", job.Name)
+	fmt.Fprintf(r.out, "\n\033[32m== Job %s completed ==\033[0m\n", job.Name)
 	return nil
 }
 
 // runStep executes a single script inside the Wasm sandbox. Returns the exit code.
-func (r *Runner) runStep(ctx context.Context, hostDir, script string, env map[string]string) (int, error) {
-	fsConfig := wazero.NewFSConfig().WithDirMount(hostDir, "/")
+func (r *Runner) runStep(ctx context.Context, fsys *memfs.FS, script string, env map[string]string) (int, error) {
+	fsConfig := wazero.NewFSConfig().(sysfs.FSConfig).WithSysFSMount(fsys, "/")
 
 	cfg := wazero.NewModuleConfig().
 		WithStdin(strings.NewReader(script)).
-		WithStdout(os.Stdout).
-		WithStderr(os.Stderr).
+		WithStdout(r.out).
+		WithStderr(r.out).
 		WithFSConfig(fsConfig).
 		WithArgs("wasmsh").
 		WithName("") // anonymous so we can instantiate repeatedly
@@ -288,9 +293,9 @@ func (r *Runner) resolveExpr(expr string, env map[string]string, stepOutputs map
 //	multi
 //	line
 //	DELIM
-func parseKeyVals(path string) map[string]string {
-	data, err := os.ReadFile(path)
-	if err != nil {
+func parseKeyVals(fsys *memfs.FS, path string) map[string]string {
+	data, ok := fsys.ReadFile(path)
+	if !ok {
 		return nil
 	}
 	result := map[string]string{}
@@ -330,9 +335,9 @@ func parseHeredocStart(line string) (key, delim string, ok bool) {
 	return key, delim, true
 }
 
-func parsePathFile(path string) []string {
-	data, err := os.ReadFile(path)
-	if err != nil {
+func parsePathFile(fsys *memfs.FS, path string) []string {
+	data, ok := fsys.ReadFile(path)
+	if !ok {
 		return nil
 	}
 	var out []string

@@ -1,0 +1,51 @@
+name: Deploy Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Wasm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Build js/wasm
+        run: GOOS=js GOARCH=wasm go build -o web/tabrunner.wasm ./web
+
+      - name: Vendor wasm_exec.js
+        run: cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" web/wasm_exec.js
+
+      - name: Strip local-only files from artifact
+        run: rm -f web/main.go web/harness.test.mjs
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

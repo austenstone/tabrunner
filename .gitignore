@@ -19,3 +19,6 @@ go.work.sum
 .DS_Store
 .idea/
 .vscode/
+
+# Generated web artifacts (built in CI)
+web/wasm_exec.js
